@@ -1,31 +1,11 @@
-// Preconfigured storage helpers for Manus WebDev templates
-// Uploads via Forge Server presigned URL to S3 (PUT direct).
-// Downloads return /manus-storage/{key} paths served via 307 redirect.
+// Storage via Cloudinary - tswira kat-b9a dima
+function getCloudinaryConfig() {
+  const url = process.env.CLOUDINARY_URL;
+  if (!url) throw new Error("CLOUDINARY_URL manquante");
 
-import { ENV } from "./_core/env";
-
-function getForgeConfig() {
-  const forgeUrl = ENV.forgeApiUrl;
-  const forgeKey = ENV.forgeApiKey;
-
-  if (!forgeUrl || !forgeKey) {
-    throw new Error(
-      "Storage config missing: set MANUS_API_URL and MANUS_API_KEY",
-    );
-  }
-
-  return { forgeUrl: forgeUrl.replace(/\/+$/, ""), forgeKey };
-}
-
-function normalizeKey(relKey: string): string {
-  return relKey.replace(/^\/+/, "");
-}
-
-function appendHashSuffix(relKey: string): string {
-  const hash = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-  const lastDot = relKey.lastIndexOf(".");
-  if (lastDot === -1) return `${relKey}_${hash}`;
-  return `${relKey.slice(0, lastDot)}_${hash}${relKey.slice(lastDot)}`;
+  const m = url.match(/cloudinary:\/\/([^:]+):([^@]+)@(.+)/);
+  if (!m) throw new Error("CLOUDINARY_URL invalide");
+  return { apiKey: m[1], apiSecret: m[2], cloudName: m[3] };
 }
 
 export async function storagePut(
@@ -33,66 +13,42 @@ export async function storagePut(
   data: Buffer | Uint8Array | string,
   contentType = "application/octet-stream",
 ): Promise<{ key: string; url: string }> {
-  const { forgeUrl, forgeKey } = getForgeConfig();
-  const key = appendHashSuffix(normalizeKey(relKey));
+  const { apiKey, apiSecret, cloudName } = getCloudinaryConfig();
 
-  // 1. Get presigned PUT URL from Forge
-  const presignUrl = new URL("v1/storage/presign/put", forgeUrl + "/");
-  presignUrl.searchParams.set("path", key);
+  const buffer = typeof data === "string"
+    ? Buffer.from(data)
+    : Buffer.from(data as Uint8Array);
 
-  const presignResp = await fetch(presignUrl, {
-    headers: { Authorization: `Bearer ${forgeKey}` },
-  });
+  const base64 = buffer.toString("base64");
+  const dataUri = `data:${contentType};base64,${base64}`;
 
-  if (!presignResp.ok) {
-    const msg = await presignResp.text().catch(() => presignResp.statusText);
-    throw new Error(`Storage presign failed (${presignResp.status}): ${msg}`);
-  }
+  const form = new FormData();
+  form.append("file", dataUri);
+  form.append("public_id", relKey.replace(/\.[^.]+$/, ""));
+  form.append("folder", "barber-shop");
+  form.append("resource_type", "auto");
 
-  const { url: s3Url } = (await presignResp.json()) as { url: string };
-  if (!s3Url) throw new Error("Forge returned empty presign URL");
+  const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString("base64");
 
-  // 2. PUT file directly to S3
-  const blob =
-    typeof data === "string"
-      ? new Blob([data], { type: contentType })
-      : new Blob([data as any], { type: contentType });
-
-  const uploadResp = await fetch(s3Url, {
-    method: "PUT",
-    headers: { "Content-Type": contentType },
-    body: blob,
-  });
-
-  if (!uploadResp.ok) {
-    throw new Error(`Storage upload to S3 failed (${uploadResp.status})`);
-  }
-
-  return { key, url: `/manus-storage/${key}` };
-}
-
-export async function storageGet(relKey: string): Promise<{ key: string; url: string }> {
-  const key = normalizeKey(relKey);
-  return { key, url: `/manus-storage/${key}` };
-}
-
-export async function storageGetSignedUrl(relKey: string): Promise<string> {
-  const { forgeUrl, forgeKey } = getForgeConfig();
-  const key = normalizeKey(relKey);
-
-  const getUrl = new URL("v1/storage/presign/get", forgeUrl + "/");
-  getUrl.searchParams.set("path", key);
-
-  const resp = await fetch(getUrl, {
-    headers: { Authorization: `Bearer ${forgeKey}` },
+  const resp = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${auth}` },
+    body: form as any,
   });
 
   if (!resp.ok) {
-    const msg = await resp.text().catch(() => resp.statusText);
-    throw new Error(`Storage signed URL failed (${resp.status}): ${msg}`);
+    const txt = await resp.text();
+    throw new Error(`Cloudinary upload failed: ${txt}`);
   }
 
-  const { url } = (await resp.json()) as { url: string };
-  if (!url) throw new Error("Storage did not return a download URL");
-  return url;
+  const json: any = await resp.json();
+  return { key: json.public_id, url: json.secure_url };
+}
+
+export async function storageGet(relKey: string) {
+  return { key: relKey, url: relKey };
+}
+
+export async function storageGetSignedUrl(relKey: string) {
+  return relKey;
 }
